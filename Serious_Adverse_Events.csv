@@ -1,0 +1,7 @@
+﻿id,Year,event1,n1,event2,n2,t1,t2,effect,se,rob,indirectness,RR,age,male,size
+"Harrison,2019",2019,5,84,2,41,Resmetirom,Placebo,0.199046,0.814680916,1,2,1.220238095,50.4,0.5,108
+"Harrison,2023",2023,24,324,20,318,Resmetirom,Placebo,0.163629424,0.292293676,1,2,1.177777778,56.1,0.46,623
+"Harrison,2024",2024,41,323,37,321,Resmetirom,Placebo,0.096442954,0.212617099,1,2,1.101246758,56.7,0.44,644
+"Shankar,2024",2024,1,25,1,24,Glucagon receptor agonists,Placebo,-0.040821995,1.385039109,1,2,0.96,55.8,0.45,49
+"Sanyal_a,2024",2024,1,18,1,19,Glucagon receptor agonists,Placebo,0.054067221,1.375431883,1,2,1.055555556,46.6,0.53,37
+"Sanyal_b,2024",2024,6,74,5,74,Glucagon receptor agonists,Placebo,0.182321557,0.582786101,1,2,1.2,50.8,0.47,148
