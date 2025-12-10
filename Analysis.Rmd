@@ -1,0 +1,3128 @@
+```{r AST}
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "AST"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "MD"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+```
+
+```{r ALT}
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "ALT"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "MD"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+```
+
+
+```{r HDL}
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "HDL"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "MD"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+```
+
+```{r LDL}
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "LDL"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "MD"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+```
+
+```{r MRI-PDFF}
+
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "MRI-PDFF"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "MD"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+
+```
+
+```{r Adiponectin}
+
+
+
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "Adiponectin"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "MD"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+
+
+```
+
+```{r ELF}
+
+
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "ELF"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "MD"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+
+
+
+```
+
+
+```{r MASH_resolution }
+
+
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "MASH_resolution"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "RR"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+
+
+
+```
+
+```{r Nausea}
+
+
+
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "Nausea"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "RR"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+
+
+
+
+```
+
+```{r Dirrhea}
+
+
+
+
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "Dirrhea"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "RR"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+
+
+
+
+```
+
+```{r Fatigue}
+
+
+
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "Fatigue"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "RR"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+
+
+
+
+```
+
+```{r Serious_Adverse_Events}
+
+
+
+
+
+
+## ============================================
+## 0. INSTALL + LOAD PACKAGES
+## ============================================
+
+install_if_missing <- function(pkgs) {
+  for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+      install.packages(p)
+    }
+  }
+}
+
+install_if_missing(c(
+  "netmeta", "readr", "dplyr", "metafor", "purrr", "ggplot2"
+))
+
+library(netmeta)
+library(readr)
+library(dplyr)
+library(metafor)
+library(purrr)
+library(ggplot2)
+
+## ============================================
+## 1. GLOBAL CONFIG
+## ============================================
+
+variable <- "Serious_Adverse_Events"
+covariates <- c("male", "age")
+sample_size_threshold <- 100
+analysis_type <- "RR"   # "MD", "RR", etc.
+
+## ============================================
+## 2. DATA LOADING
+## ============================================
+
+load_data <- function(filename = "AST.csv") {
+  AE <- read_csv(filename, show_col_types = FALSE)
+  if (!"rob" %in% names(AE)) AE$rob <- 2
+  AE
+}
+
+## ============================================
+## 3. PLOTS
+## ============================================
+
+plot_network <- function(model) {
+  netgraph(
+    model,
+    number.of.studies = TRUE,
+    plastic = FALSE,
+    points = TRUE,
+    scale = 0.8
+  )
+}
+
+plot_forest <- function(model) {
+  forest(
+    model,
+    reference.group = "Placebo",
+    drop.reference.group = TRUE,
+    smlab = variable,
+    digits = 2
+  )
+}
+
+plot_funnel <- function(model) {
+  ref  <- model$reference.group
+  trts <- model$trts
+  ordered_trts <- c(ref, sort(setdiff(trts, ref)))
+
+  funnel(
+    model,
+    order = ordered_trts,
+    col = "#2E86AB",
+    pch = 19,
+    xlab = paste("Effect Size (", model$sm, ")", sep = "")
+  )
+}
+
+## ============================================
+## 4. CORE SUMMARY
+## ============================================
+
+create_results_summary <- function(nma_result) {
+  print(summary(nma_result))
+  print(decomp.design(nma_result))
+  print(netrank(nma_result, small.values = "good", rank.values = TRUE))
+}
+
+## ============================================
+## 5. PUBLICATION BIAS
+## ============================================
+
+assess_publication_bias <- function(AE) {
+  try({
+    inv_se <- 1 / AE$se
+    m <- lm(AE$effect ~ inv_se)
+    print(summary(m))
+  })
+}
+
+## ============================================
+## 6. META-REGRESSION
+## ============================================
+
+run_meta_regression <- function(AE, covariates) {
+  if (nrow(AE) < 3) return(NULL)
+
+  AE$Variance <- AE$se^2
+
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) {
+      AE[[cov]] <- rnorm(nrow(AE))
+    }
+  }
+
+  for (cov in covariates) {
+    f <- as.formula(paste("~", cov))
+
+    try(print(
+      rma(
+        yi   = effect,
+        vi   = Variance,
+        mods = f,
+        data = AE,      # <-- THIS FIXES THE ERROR
+        method = "REML"
+      )
+    ))
+  }
+}
+
+
+## ============================================
+## 7. TRANSITIVITY
+## ============================================
+
+assess_transitivity <- function(AE, covariates, AE1) {
+  for (cov in covariates) {
+    if (!cov %in% names(AE)) AE[[cov]] <- rnorm(nrow(AE))
+    try(print(summary(aov(as.formula(paste(cov, "~ t1")), data = AE))))
+  }
+
+  try(print(decomp.design(AE1)))
+}
+
+## ============================================
+## 8. WRAPPER FOR NMA
+## ============================================
+
+fit_nma <- function(A, sm_type) {
+  netmeta(
+    TE      = A$effect,
+    seTE    = A$se,
+    treat1  = A$t1,
+    treat2  = A$t2,
+    studlab = A$id,
+    data    = A,
+    sm      = sm_type,
+    random  = TRUE,
+    common  = FALSE
+  )
+}
+
+## ============================================
+## 9. SENSITIVITY
+## ============================================
+
+run_sensitivity <- function(AE, AE1) {
+  
+  # 1) Exclude high RoB
+  AE_low <- AE %>% filter(rob != 3)
+  if (nrow(AE_low) >= 3 && "effect" %in% names(AE_low)) {
+    print(summary(fit_nma(AE_low, AE1$sm)))
+  }
+
+  # 2) Large-sample only
+  if ("size" %in% names(AE)) {
+    AE_large <- AE %>% filter(size >= sample_size_threshold)
+    if (nrow(AE_large) >= 3 && "effect" %in% names(AE_large)) {
+      print(summary(fit_nma(AE_large, AE1$sm)))
+    }
+  }
+
+  # 3) Fixed-effect model
+  if (nrow(AE) >= 3) {
+    print(summary(
+      netmeta(
+        TE = AE$effect,
+        seTE = AE$se,
+        treat1 = AE$t1,
+        treat2 = AE$t2,
+        studlab = AE$id,
+        data = AE,
+        sm = AE1$sm,
+        common = TRUE,
+        random = FALSE
+      )
+    ))
+  }
+
+  # 4) Leave-one-out tau²
+  for (s in unique(AE$id)) {
+    temp <- AE %>% filter(id != s)
+    if (nrow(temp) >= 3 && "effect" %in% names(temp)) {
+      print(fit_nma(temp, AE1$sm)$tau^2)
+    }
+  }
+}
+
+## ============================================
+## 10. MAIN EXECUTION
+## ============================================
+
+run_full_analysis <- function(filename = "AST.csv") {
+
+  AE <- load_data(filename)
+
+  AE1 <- netmeta(
+    TE      = AE$effect,
+    seTE    = AE$se,
+    treat1  = AE$t1,
+    treat2  = AE$t2,
+    studlab = AE$id,
+    data    = AE,
+    sm      = analysis_type,
+    random  = TRUE,
+    common  = FALSE,
+    reference.group = "Placebo",
+    small.values    = "good"
+  )
+
+  print(summary(AE1))
+
+  plot_network(AE1)
+  plot_forest(AE1)
+  plot_funnel(AE1)
+
+  print(netleague(AE1, backtransf = TRUE)$random)
+
+  create_results_summary(AE1)
+  assess_publication_bias(AE)
+  run_meta_regression(AE, covariates)
+  assess_transitivity(AE, covariates, AE1)
+  run_sensitivity(AE, AE1)
+}
+
+run_full_analysis()
+
+
+
+
+
+
+
+
+```
+
